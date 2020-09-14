@@ -7,7 +7,10 @@ import com.typesafe.config.ConfigFactory
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.cassandra._
+import org.apache.spark.sql.functions._
 import java.sql.{Connection, DriverManager, Statement}
+
+import com.example.loaddvd.config
 
 object loaddvd extends App {
 
@@ -21,9 +24,9 @@ object loaddvd extends App {
   val rdbmsSrvPort = rdbmsCfg.getString("port")
   val rdbmsUsrName = rdbmsCfg.getString("user_name")
   val srcDBName = rdbmsCfg.getString("db_name")
-  val srcTblName = rdbmsCfg.getString("tbl_name")
+  val srcTblNames = rdbmsCfg.getStringList("tbl_names")
   // PostgreSQL JDBC connection URL
-  val rdbmsConnUrl = "jdbc:postgresql://" + rdbmsSrvIp + ":" + rdbmsSrvPort + "/" + srcDBName;
+  val rdbmsConnUrl = "jdbc:postgresql://" + rdbmsSrvIp + ":" + rdbmsSrvPort + "/" + srcDBName
 
 
   /**
@@ -45,13 +48,17 @@ object loaddvd extends App {
   var rdbmsConnnection:Connection = null
   var spark:SparkSession = null
 
-  try {
-    /**
-     * Read from source RDBMS using JDBC driver
-     */
-    Class.forName("org.postgresql.Driver")
-    rdbmsConnnection = DriverManager.getConnection(rdbmsConnUrl, rdbmsUsrName, "")
-    val statement = rdbmsConnnection.createStatement();
+  /**
+   * Used to determine how many partitions are needed for parallel reading
+   * from an RDBMS table
+   */
+
+  def getNumPartitionsForParallelRead( queryStmt: Statement, tblName: String, numRecPerPartition: Int ) = {
+    var srcTblPkColName = ""
+    var minval = 0
+    var maxval = 0
+    var numPartitions = 0
+
 
     // First, get the primary key column name for the specified table
     var sqlQueryStr =
@@ -66,110 +73,229 @@ object loaddvd extends App {
         "kcu.constraint_name = tco.constraint_name and " +
         "kcu.constraint_schema = tco.constraint_schema and " +
         "kcu.constraint_name = tco.constraint_name " +
-        "where tco.constraint_type = 'PRIMARY KEY' and kcu.table_name = '" + srcTblName + "'"
+        "where tco.constraint_type = 'PRIMARY KEY' and kcu.table_name = '" + tblName + "'"
 
-    var resultSet = statement.executeQuery(sqlQueryStr)
-    var srcTblPkColName = ""
+    var resultSet = queryStmt.executeQuery(sqlQueryStr)
 
-    // NOTE: for this test, the source table only has a single-column primary key
-    resultSet.next()
-    srcTblPkColName = resultSet.getString("key_column")
+    // [NOTE] Partition by the first primary key column
+    if ( resultSet.next() ) {
+      srcTblPkColName = resultSet.getString("key_column")
+    }
 
     // Second, read min and max primary key value (used later for calculating "numPartitions")
-    if ( !srcTblName.isEmpty ) {
-      sqlQueryStr = "select min(" + srcTblPkColName + "), max(" + srcTblPkColName + ") from " + srcTblName;
-      resultSet = statement.executeQuery(sqlQueryStr)
+    if ( srcTblPkColName != null ) {
+      sqlQueryStr = "select min(" + srcTblPkColName + "), max(" + srcTblPkColName + ") from " + tblName
+      resultSet = queryStmt.executeQuery(sqlQueryStr)
 
-      resultSet.next()
-      val minval = resultSet.getString(1).toInt
-      val maxval = resultSet.getString(2).toInt
+      if (resultSet.next()) {
+        minval = resultSet.getString(1).toInt
+        maxval = resultSet.getString(2).toInt
+        println(tblName + "." + srcTblPkColName + "(min, max) = (" + minval + ", " + maxval + ").")
 
-      println(srcTblName + "." +srcTblPkColName + "(min, max) = (" + minval + ", " + maxval + ").\n" )
+        numPartitions = (maxval - minval) / numRecPerPartition + 1
+      }
+    }
 
+    (srcTblPkColName, minval, maxval, numPartitions)
+  }
+
+  def exitWithCode(connection: Connection, spark: SparkSession, code: Int): Unit = {
+    // Close connection to the source RDBMS
+    if ( connection != null ) {
+      connection.close()
+    }
+
+    // Close connection to Spark
+    if ( spark != null ) {
+      spark.close()
+    }
+
+    System.exit(code)
+  }
+
+  try {
+    /**
+     * Read from source RDBMS using JDBC driver
+     */
+    Class.forName("org.postgresql.Driver")
+    rdbmsConnnection = DriverManager.getConnection(rdbmsConnUrl, rdbmsUsrName, "")
+    val statement = rdbmsConnnection.createStatement()
+
+    /**
+     * Establish connection to Spark
+     */
+    val sparkConf = new SparkConf()
+      .setMaster(dseSparkMasterUrl)
+      .setAppName("loaddvd")
+      .set("spark.cassandra.connection.host", sparkMasterIp)
+      .set("spark.cassandra.connection.port", cassSrvPort)
+      // -- Needed for submitting a job in client deployment mode
+      //.set("spark.driver.host", sparkDriverIp)
+      //.set("spark.driver.port", sparkDriverPort.toString)
+    val spark = SparkSession
+      .builder()
+      .config(sparkConf)
+      .getOrCreate()
+    import spark.implicits._
+
+
+    if ( !srcTblNames.isEmpty ) {
+      val numRecordPerPartition = config.getInt("num_record_per_partition")
 
       /**
-       * Write to DSE/C* using Spark
+       * STEP 1: Read "film" table into Spark
        */
-      // Establish connection to Spark
-      val sparkConf = new SparkConf()
-        .setMaster(dseSparkMasterUrl)
-        .setAppName("loadfilm")
-        .set("spark.cassandra.connection.host", sparkMasterIp)
-        .set("spark.cassandra.connection.port", cassSrvPort)
-        // Needed for standalone-master
-        .set("spark.driver.host", sparkDriverIp)
-        .set("spark.driver.port", sparkDriverPort.toString)
+      val filmTblName = srcTblNames.get(0)
 
-      val spark = SparkSession
-        .builder()
-        .config(sparkConf)
-        .getOrCreate()
-
-      import spark.implicits._
+      val (srcTblPkColName0, minval0, maxval0, numPartitions0) =
+        getNumPartitionsForParallelRead(
+          statement,
+          filmTblName,
+          numRecordPerPartition
+        )
+      if ( numPartitions0 == 0 ) {
+        println("Failed to calculate parallel reading partitions for table \"" + filmTblName + "\"")
+        exitWithCode(rdbmsConnnection, spark, 10)
+      }
 
       // Do parallel reading
-      val numPartitions = (maxval - minval) / config.getInt("num_record_per_parition")
-
-      var srcTblDF = spark.read
+      var filmTblDF = spark.read
         .format("jdbc")
         .option("driver", "org.postgresql.Driver")
         .option("url", rdbmsConnUrl)
-        .option("dbtable", srcTblName)
+        .option("dbtable", filmTblName)
         .option("user", rdbmsUsrName)
-        .option("lowerBound", minval)
-        .option("upperBound", maxval)
-        .option("numPartitions", numPartitions)
-        .option("partitionColumn", srcTblPkColName)
+        .option("lowerBound", minval0)
+        .option("upperBound", maxval0)
+        .option("numPartitions", numPartitions0)
+        .option("partitionColumn", srcTblPkColName0)
         .load()
-
-      // Drop the standard "last_update" column
-      srcTblDF = srcTblDF.drop("last_update")
-
+        .drop("last_update")
       //== Debug purpose ==
-      srcTblDF.printSchema()
-      srcTblDF.show(5)
+      //filmTblDF.printSchema()
+      //filmTblDF.show(5)
+      filmTblDF.createOrReplaceTempView(filmTblName)
 
-      // Create a C* table
 
-      // NOTE: Having issues with DataFrame related functions
-      //       Don't know the solution yet; actively investigating
-      // E.g. one error when creating a C* table using DF function is as below
-      //    java.lang.NoSuchMethodError: 'com.datastax.spark.connector.DataFrameFunctions com.datastax.spark.connector.package$.toDataFrameFunctions(org.apache.spark.sql.Dataset)'
-      /*
-      srcTblDF.createCassandraTable(
-        tgtKsName,
-        tgtTblName,
-        partitionKeyColumns = Some(Seq(srcTblPkColName)))
+      /**
+       * STEP 2: Read "actor" table
+       */
+      val actorTblName = srcTblNames.get(1)
+      var (srcTblPkColName1, minval1, maxval1, numPartitions1) =
+        getNumPartitionsForParallelRead(
+          statement,
+          actorTblName,
+          numRecordPerPartition
+        )
+      if (numPartitions1 == 0) {
+        println("Failed to calculate parallel reading partitions for table \"" + actorTblName + "\"")
+        //exitWithCode(rdbmsConnnection, spark, 20)
+      }
 
-      srcTblDF.write
-        .cassandraFormat(tgtKsName, tgtTblName)
-        //.mode("append")
+      // Do parallel reading
+      val actorTblDF = spark.read
+        .format("jdbc")
+        .option("driver", "org.postgresql.Driver")
+        .option("url", rdbmsConnUrl)
+        .option("dbtable", actorTblName)
+        .option("user", rdbmsUsrName)
+        .option("lowerBound", minval1)
+        .option("upperBound", maxval1)
+        .option("numPartitions", numPartitions1)
+        .option("partitionColumn", srcTblPkColName1)
+        .load()
+        .drop("last_update")
+      //== Debug purpose ==
+      //actorTblDF.printSchema()
+      //actorTblDF.show(5)
+      actorTblDF.createOrReplaceTempView(actorTblName)
+
+      /**
+       * STEP 3: Read "film_actor" table
+       */
+      val filmActorTblName = srcTblNames.get(2)
+      val (srcTblPkColName2, minval2, maxval2, numPartitions2) =
+        getNumPartitionsForParallelRead(
+          statement,
+          filmActorTblName,
+          numRecordPerPartition
+        )
+      if (numPartitions2 == 0) {
+        println("Failed to calculate parallel reading partitions for table \"" + filmActorTblName + "\"")
+        exitWithCode(rdbmsConnnection, spark, 30)
+      }
+
+      // Do parallel reading
+      val filmActorTblDF = spark.read
+        .format("jdbc")
+        .option("driver", "org.postgresql.Driver")
+        .option("url", rdbmsConnUrl)
+        .option("dbtable", filmActorTblName)
+        .option("user", rdbmsUsrName)
+        .option("lowerBound", minval2)
+        .option("upperBound", maxval2)
+        .option("numPartitions", numPartitions2)
+        .option("partitionColumn", srcTblPkColName2)
+        .load()
+        .drop("last_update")
+      //== Debug purpose ==
+      //filmActorTblDF.printSchema()
+      //filmActorTblDF.show(5)
+      filmActorTblDF.createOrReplaceTempView(filmActorTblName)
+
+      /**
+       * STEP 4: Combine "film", "actor", "film_actor" DataFrames together into
+       *         one consolidated table
+       */
+      val combinedDF = spark.sql(
+        "select f.*, concat(a.last_name, ', ', a.first_name) as actor_name " +
+          "from film as f, actor as a, film_actor as fa " +
+          "where f.film_id  = fa.film_id  and fa.actor_id = a.actor_id "
+      )
+      combinedDF.printSchema()
+
+      /**
+       * STEP 5: Write the combined "film_actor" table in DSE/C*
+       */
+      // Check if the target keyspace and table exists
+      val sysSchemaTableDF = spark.read
+        .cassandraFormat("tables", "system_schema")
+        .load()
+        .filter("table_name == '" + tgtTblName + "'")
+        .filter("keyspace_name == '" + tgtKsName + "'")
+      val exists = sysSchemaTableDF.count()
+      println("Target table exists = " + exists)
+
+      if ( exists == 0 ) {
+        // Create a C* table (using DataFrame functions
+        combinedDF.createCassandraTable(
+          tgtKsName,
+          tgtTblName,
+          partitionKeyColumns = Some(Seq("film_id")),
+          clusteringKeyColumns = Some(Seq("actor_name")))
+      }
+
+      combinedDF.write
+        .cassandraFormat(tgtTblName, tgtKsName)
+        .mode("append")
         .save()
-      */
 
-      // Write to an existing C* table
+      // Write to an existing C* table (using RDD function)
+      // -- just for reference
       //implicit def arrayToList[A](arr: Array[A]) = arr.toList
+      /*
       val colNameArray: Array[String] = srcTblDF.schema.names
       srcTblDF.rdd.saveToCassandra(
         tgtKsName,
         tgtTblName,
         SomeColumns(colNameArray.map(ColumnName(_)): _*)
       )
+      */
     }
   }
   catch {
     case e : Throwable => e.printStackTrace()
   }
 
-  // Close connection to the source RDBMS
-  if ( rdbmsConnnection != null ) {
-    rdbmsConnnection.close()
-  }
-
-  // Close connection to Spark
-  if ( spark != null ) {
-    spark.close()
-  }
-
-  System.exit(0)
+  exitWithCode(rdbmsConnnection, spark, 0)
 }

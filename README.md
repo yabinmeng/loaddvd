@@ -239,7 +239,7 @@ For Spark JDBC data read, the only way to achieve predicate push-down is to expl
 scala> val jdbcDF2 = (
      |     spark.read.format("jdbc")
      |     .option("driver", "org.postgresql.Driver")
-     |     .option("url", "jdbc:postgresql://10.101.33.137:5432/dvdrental")
+     |     .option("url", "jdbc:postgresql://<ip_address>:5432/dvdrental")
      |     .option("user", "postgres")
      |     .option("query", "select * from actor where actor_id between 20 and 25")
      |     .load()

@@ -164,3 +164,100 @@ $ sbt clean assembly
 ```
 $ dse spark-submit --master dse://<dse_node_ip>:9042 --deploy-mode cluster --class com.example.loaddvd <some_location>/loaddvd-assembly-1.0.jar
 ```
+
+# Appendix: Misc. Topics of Using JDBC with Spark
+
+## Using RDBMS JDBC Driver with Spark Shell
+
+In a DSE (Analytics) cluster, we can launch a Spark Shell REPL (Read Eval Print Loop) by running the following command on any node in the cluster.
+```
+$ dse spark
+```
+
+In order to be able access a remote RDBMS via JDBC, we need to first download the  JDBC driver for the corresponding RDBMS; then we start Spak Shell with specific extra jars. For PostgreSQL RDBMS (as we used in this dmo), the procedure is as below:
+```
+$ wget https://jdbc.postgresql.org/download/postgresql-42.2.16.jar
+
+$ dse spark --jars postgresql-42.2.16.jar
+```
+
+Once in the Spark shell, we can read data using JDBC like this (using PostgreSQL as an example):
+```
+scala> val jdbcDF = (
+     |     spark.read.format("jdbc")
+     |     .option("driver", "org.postgresql.Driver")
+     |     .option("url", "jdbc:postgresql://<ip_address>:5432/dvdrental")
+     |     .option("dbtable", "actor")
+     |     .option("user", "postgres")
+     |     .load()
+     | )
+jdbcDF: org.apache.spark.sql.DataFrame = [actor_id: int, first_name: string ... 2 more fields]
+
+scala> jdbcDF.printSchema()
+root
+ |-- actor_id: integer (nullable = true)
+ |-- first_name: string (nullable = true)
+ |-- last_name: string (nullable = true)
+ |-- last_update: timestamp (nullable = true)
+
+
+scala> jdbcDF.show(5)
++--------+----------+------------+--------------------+
+|actor_id|first_name|   last_name|         last_update|
++--------+----------+------------+--------------------+
+|       1|  Penelope|     Guiness|2013-05-26 14:47:...|
+|       2|      Nick|    Wahlberg|2013-05-26 14:47:...|
+|       3|        Ed|       Chase|2013-05-26 14:47:...|
+|       4|  Jennifer|       Davis|2013-05-26 14:47:...|
+|       5|    Johnny|Lollobrigida|2013-05-26 14:47:...|
++--------+----------+------------+--------------------+
+only showing top 5 rows
+```
+
+## JDBC Read Predicate Push-down
+
+When using JDBC to read data in Spark, if we want to limit the scope of the selected data, one way is to apply Spark "filter()" function on the created JDBC data frame. Using the above Spark shell example, we can do this via the following command:
+```
+scala> jdbcDF.filter($"actor_id".between(20, 25)).show()
++--------+----------+---------+--------------------+
+|actor_id|first_name|last_name|         last_update|
++--------+----------+---------+--------------------+
+|      20|   Lucille|    Tracy|2013-05-26 14:47:...|
+|      21|   Kirsten|  Paltrow|2013-05-26 14:47:...|
+|      22|     Elvis|     Marx|2013-05-26 14:47:...|
+|      23|    Sandra|   Kilmer|2013-05-26 14:47:...|
+|      24|   Cameron|   Streep|2013-05-26 14:47:...|
+|      25|     Kevin|    Bloom|2013-05-26 14:47:...|
++--------+----------+---------+--------------------+
+```  
+
+This method, however, doesn't do predicate (filtering condition) push-down to the RDBMS. It reads all data in an RDBMS table and do the filtering within Spark. For a large table, this will put pressure on Spark and will not have good performance.
+
+For Spark JDBC data read, the only way to achieve predicate push-down is to explicitly specify the SQL statement with where condition, as below. Pay attention to the new "query" option part. 
+
+```
+scala> val jdbcDF2 = (
+     |     spark.read.format("jdbc")
+     |     .option("driver", "org.postgresql.Driver")
+     |     .option("url", "jdbc:postgresql://10.101.33.137:5432/dvdrental")
+     |     .option("user", "postgres")
+     |     .option("query", "select * from actor where actor_id between 20 and 25")
+     |     .load()
+     | )
+jdbcDF: org.apache.spark.sql.DataFrame = [actor_id: int, first_name: string ... 2 more fields]
+
+scala> jdbcDF2.show
++--------+----------+---------+--------------------+
+|actor_id|first_name|last_name|         last_update|
++--------+----------+---------+--------------------+
+|      20|   Lucille|    Tracy|2013-05-26 14:47:...|
+|      21|   Kirsten|  Paltrow|2013-05-26 14:47:...|
+|      22|     Elvis|     Marx|2013-05-26 14:47:...|
+|      23|    Sandra|   Kilmer|2013-05-26 14:47:...|
+|      24|   Cameron|   Streep|2013-05-26 14:47:...|
+|      25|     Kevin|    Bloom|2013-05-26 14:47:...|
++--------+----------+---------+--------------------+
+)
+```
+
+**NOTE** that in the above example, data frame *jdbcDF2* only reads 5 records as specified in the SQL statement.

@@ -147,3 +147,20 @@ The program is able to automatically identify each PostgreSQL table's primary ke
 
 ## Write C* Table
 
+The program writes denormalized data into C* table using Spark SQL and Spark Cassandra Connector. **NOTE** that Spark SQL is not necessary. We can achieve the same goal by simply using Spark DataSet/DataFrame functions directly. Spark SQL is used here purely for demo purpose for those who're more comfortable with "SQL style" data manipulation.
+
+Because Spark SQL is used, this program needs to be submitted in *cluster* mode if the submitting client machine is outside the DSE cluster. This is because in order to use Spark SQL, Hive metastore needs to be accessible to the submitting client machine (or to be more precisely, to be accessible to *spark driver*). The Hive metastore in DSE (Analytics) cluster, by default, is not visible externally.
+
+## Execute the Program
+
+* Use the following command to build a Uber jar ("loaddvd-assembly-1.0.jar")
+```
+$ sbt clean assembly 
+```
+
+* Once the Uber jar file is created, copy it to some location on the Spark master node in the DSE cluster. 
+
+* Then run the following command to submit the Spark job (assuming the submitting client machine is remotely outside the DSE cluster).
+```
+$ dse spark-submit --master dse://<dse_node_ip>:9042 --deploy-mode cluster --class com.example.loaddvd <some_location>/loaddvd-assembly-1.0.jar
+```

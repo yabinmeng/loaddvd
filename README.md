@@ -233,7 +233,7 @@ scala> jdbcDF.filter($"actor_id".between(20, 25)).show()
 
 This method, however, doesn't do predicate (filtering condition) push-down to the RDBMS. It reads all data in an RDBMS table and do the filtering within Spark. For a large table, this will put pressure on Spark and will not have good performance.
 
-For Spark JDBC data read, the only way to achieve predicate push-down is to explicitly specify the SQL statement with where condition, as below. Pay attention to the new "query" option part. 
+For Spark JDBC data read, the only way to achieve predicate push-down is to explicitly specify the SQL statement with where condition, as below. Pay attention to the new "query" option part (**Note** "query" option is mutually exclusive with "dbtable" option and we need to remove "dbtable" option here). 
 
 ```
 scala> val jdbcDF2 = (

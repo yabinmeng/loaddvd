@@ -189,7 +189,7 @@ object loaddvd extends App {
         )
       if (numPartitions1 == 0) {
         println("Failed to calculate parallel reading partitions for table \"" + actorTblName + "\"")
-        //exitWithCode(rdbmsConnnection, spark, 20)
+        exitWithCode(rdbmsConnnection, spark, 20)
       }
 
       // Do parallel reading

@@ -45,11 +45,55 @@ By default, the installed PostgreSQL server only listens on localhost and doesn'
   host    all             all             0.0.0.0/0               trust
   ```
 
-After making the above changes, we can connect to PostgreSQL server from external, such as from the DSE cluster node.
+After making the above changes, make sure to restart PostgreSQL server. Once the server is back online, we can connect to PostgreSQL server from external, such as from the DSE cluster node. 
+```
+$ sudo service postgresql restart
+``` 
 
-* **Load Sample Data Set**
+* **Load Sample Data Set (Source)**
 
 The sample data set we're going to use in this demo is from the following website:
 https://www.postgresqltutorial.com/postgresql-sample-database/
 
-This sample data set represents a [DVD rental ER model]() 
+This sample data set represents a [DVD rental ER model](https://github.com/yabinmeng/loaddvd/blob/master/src/main/resources/dvd-rental-sample-database-diagram.png)
+
+The [sample data set](https://github.com/yabinmeng/loaddvd/blob/master/sample_dataset/dvdrental.tar) can be loaded into a PostgreSQL database named *dvdrental* using the following command:
+```
+$ pg_restore -U postgres -d dvdrental ./dvdrental.tar
+```
+
+## Target C* Table Schema 
+
+In this demo, we're only going to focus on the following 3 tables:
+* film
+* actor
+* film_actor
+
+The **goal** is to denormalize the film data and the actor data into one consolidated C* table with some minor modification. The C* table schema looks like this:
+
+```
+CREATE TABLE testks.film_actor (
+    film_id int,
+    actor_name text,
+    description text,
+    fulltext text,
+    language_id smallint,
+    length smallint,
+    rating text,
+    release_year int,
+    rental_duration smallint,
+    rental_rate decimal,
+    replacement_cost decimal,
+    special_features list<text>,
+    title text,
+    PRIMARY KEY (film_id, actor_name)
+)
+```
+
+**NOTE**
+
+In this demo program, we don't need to create the above C* schema manually in-advance. The program is going to infer the C* table schema from the original PostgreSQL table schema and/or the required modification. 
+
+However, the C* table schema created this way does have some limitations. For example, in the above schema, all non-primary-key columns can be made *static* because they're all film related data, aka, they're the same for all rows (*actor_name*) under one partition (*film_id*).
+
+We definitely can create a more appropriate C* table schema manually in advance. The program will simply skip the step of creating a C* table.

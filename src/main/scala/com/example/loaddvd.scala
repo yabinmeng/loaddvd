@@ -32,12 +32,12 @@ object loaddvd extends App {
   /**
    * Reading source - DSE/C* cluster information
    */
-  val cassCfg = config.getConfig("cassandra")
-  val cassSrvIp = cassCfg.getString("contact_point_ip")
-  val cassSrvPort = cassCfg.getString("contact_point_port")
-  val tgtKsName = cassCfg.getString("ks_name")
-  val tgtTblName = cassCfg.getString("tbl_name")
-  val sparkCfg = config.getConfig("cassandra.spark")
+  val dseCfg = config.getConfig("dse")
+  val cassSrvIp = dseCfg.getString("contact_point_ip")
+  val cassSrvPort = dseCfg.getString("contact_point_port")
+  val tgtKsName = dseCfg.getString("ks_name")
+  val tgtTblName = dseCfg.getString("tbl_name")
+  val sparkCfg = dseCfg.getConfig("cassandra.spark")
   val sparkMasterIp = sparkCfg.getString("master_ip")
   val sparkDriverIp = sparkCfg.getString("driver_ip")
   val sparkDriverPort = sparkCfg.getInt("driver_port")

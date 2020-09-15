@@ -18,13 +18,9 @@ The environment setup is as below:
 * Run the following commands to install PostgreSQL
 ```
 $ sudo apt update
-
 $ sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
-
 $ wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
-
 $ sudo apt update
-
 $ sudo apt -y install postgresql
 ```
 
@@ -97,3 +93,57 @@ In this demo program, we don't need to create the above C* schema manually in-ad
 However, the C* table schema created this way does have some limitations. For example, in the above schema, all non-primary-key columns can be made *static* because they're all film related data, aka, they're the same for all rows (*actor_name*) under one partition (*film_id*).
 
 We definitely can create a more appropriate C* table schema manually in advance. The program will simply skip the step of creating a C* table.
+
+# Program Introduction
+
+The program is a Spark program that needs to be submitted to the DSE (Analytics) cluster for execution. At high level, the program logic is simple. But there are a few things that are worthy a few more explanation. 
+
+## Configuration file (application.conf)
+
+The program reads some key settings from a configuration file named *application.conf*. The content of this file is very straight-forward and self-explanatory except the following ones:
+
+* **num_record_per_partition**: When spark reading data from a PostgreSQL database, the reads can be executed in parallel with smaller chunks of data. This setting helps control the parallelism of spark data reading.
+
+* **dse.spark.driver_ip** and **dse.spark.driver_host**: Ignore these 2 settings. They were used for testing purpose and are not relevant anymore. They are kept here simply for book keeping purpose.  
+
+```
+conf {
+    num_record_per_partition = 500
+
+    rdbms {
+        ip = "<postgres_ip_address>"
+        port = 5432
+        user_name = "<db_user_name>"
+        db_name = "dvdrental"
+        tbl_names = ["film", "actor", "film_actor"]
+    }
+    dse {
+        contact_point_ip = "<dse_ip_address>"
+        contact_point_port = 9042
+        ks_name = "testks"
+        tbl_name = "film_actor"
+
+        spark {
+            master_ip = "<dse_master_ip>"
+
+            driver_ip = "<driver_host_ip>"
+            driver_port = 51460
+        }
+    }
+}
+```
+
+## Parallel Read Data from a PostgreSQL table
+
+In order to get better read performance, Spark reads each PostgreSQL table concurrently with multiple partitions. The partitioning column used in this program is each table's primary key column. For a table with multiple primary key columns, the first one is used.
+
+The number of the partitions that are used by Spark is calculated by the following formula:
+
+```
+numPartitions = ( max(partitioningColumn) - min(paritioningColumn) ) / num_record_per_partition + 1
+```
+
+The program is able to automatically identify each PostgreSQL table's primary key and therefore the partitioning column to be used by Spark.
+
+## Write C* Table
+

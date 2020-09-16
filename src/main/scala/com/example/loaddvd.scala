@@ -1,16 +1,11 @@
 package com.example
 
-import java.util.Properties
-
 import com.datastax.spark.connector._
 import com.typesafe.config.ConfigFactory
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.cassandra._
-import org.apache.spark.sql.functions._
 import java.sql.{Connection, DriverManager, Statement}
-
-import com.example.loaddvd.config
 
 object loaddvd extends App {
 
@@ -19,7 +14,7 @@ object loaddvd extends App {
   /**
    * Reading source - RDBMS information
    */
-  val rdbmsCfg = config.getConfig("rdbms")
+  val rdbmsCfg = config.getConfig("rdbms_srv")
   val rdbmsSrvIp = rdbmsCfg.getString("ip")
   val rdbmsSrvPort = rdbmsCfg.getString("port")
   val rdbmsUsrName = rdbmsCfg.getString("user_name")
@@ -28,16 +23,15 @@ object loaddvd extends App {
   // PostgreSQL JDBC connection URL
   val rdbmsConnUrl = "jdbc:postgresql://" + rdbmsSrvIp + ":" + rdbmsSrvPort + "/" + srcDBName
 
-
   /**
    * Reading source - DSE/C* cluster information
    */
-  val dseCfg = config.getConfig("dse")
+  val dseCfg = config.getConfig("dse_srv")
   val cassSrvIp = dseCfg.getString("contact_point_ip")
   val cassSrvPort = dseCfg.getString("contact_point_port")
   val tgtKsName = dseCfg.getString("ks_name")
   val tgtTblName = dseCfg.getString("tbl_name")
-  val sparkCfg = dseCfg.getConfig("cassandra.spark")
+  val sparkCfg = config.getConfig("dse_srv.spark")
   val sparkMasterIp = sparkCfg.getString("master_ip")
   val sparkDriverIp = sparkCfg.getString("driver_ip")
   val sparkDriverPort = sparkCfg.getInt("driver_port")
@@ -49,10 +43,9 @@ object loaddvd extends App {
   var spark:SparkSession = null
 
   /**
-   * Used to determine how many partitions are needed for parallel reading
+   * Determine how many partitions are needed for parallel reading
    * from an RDBMS table
    */
-
   def getNumPartitionsForParallelRead( queryStmt: Statement, tblName: String, numRecPerPartition: Int ) = {
     var srcTblPkColName = ""
     var minval = 0
@@ -113,6 +106,32 @@ object loaddvd extends App {
     System.exit(code)
   }
 
+  /**
+   * Use JDBC to read data from a table and register a Spark SQL view
+   */
+  def jdbcRead(sparkSession: SparkSession, tblName: String, minval: Int, maxval: Int, numPartitions: Int, partionColName: String) = {
+    // Do parallel reading
+    var jdbcDF = sparkSession.read
+      .format("jdbc")
+      .option("driver", "org.postgresql.Driver")
+      .option("url", rdbmsConnUrl)
+      .option("user", rdbmsUsrName)
+      .option("dbtable", tblName)
+      .option("lowerBound", minval)
+      .option("upperBound", maxval)
+      .option("numPartitions", numPartitions)
+      .option("partitionColumn", partionColName)
+      .load()
+      .drop("last_update")
+
+    //== Debug purpose ==
+    //jdbcDF.printSchema()
+    //jdbcDF.show(5)
+    jdbcDF.createOrReplaceTempView(tblName)
+
+    jdbcDF
+  }
+
   try {
     /**
      * Read from source RDBMS using JDBC driver
@@ -159,23 +178,7 @@ object loaddvd extends App {
       }
 
       // Do parallel reading
-      var filmTblDF = spark.read
-        .format("jdbc")
-        .option("driver", "org.postgresql.Driver")
-        .option("url", rdbmsConnUrl)
-        .option("dbtable", filmTblName)
-        .option("user", rdbmsUsrName)
-        .option("lowerBound", minval0)
-        .option("upperBound", maxval0)
-        .option("numPartitions", numPartitions0)
-        .option("partitionColumn", srcTblPkColName0)
-        .load()
-        .drop("last_update")
-      //== Debug purpose ==
-      //filmTblDF.printSchema()
-      //filmTblDF.show(5)
-      filmTblDF.createOrReplaceTempView(filmTblName)
-
+      val filmTblDF = jdbcRead(spark, filmTblName, minval0, maxval0, numPartitions0, srcTblPkColName0)
 
       /**
        * STEP 2: Read "actor" table
@@ -193,22 +196,7 @@ object loaddvd extends App {
       }
 
       // Do parallel reading
-      val actorTblDF = spark.read
-        .format("jdbc")
-        .option("driver", "org.postgresql.Driver")
-        .option("url", rdbmsConnUrl)
-        .option("dbtable", actorTblName)
-        .option("user", rdbmsUsrName)
-        .option("lowerBound", minval1)
-        .option("upperBound", maxval1)
-        .option("numPartitions", numPartitions1)
-        .option("partitionColumn", srcTblPkColName1)
-        .load()
-        .drop("last_update")
-      //== Debug purpose ==
-      //actorTblDF.printSchema()
-      //actorTblDF.show(5)
-      actorTblDF.createOrReplaceTempView(actorTblName)
+      val actorTblDF = jdbcRead(spark, actorTblName, minval1, maxval1, numPartitions1, srcTblPkColName1)
 
       /**
        * STEP 3: Read "film_actor" table
@@ -226,22 +214,7 @@ object loaddvd extends App {
       }
 
       // Do parallel reading
-      val filmActorTblDF = spark.read
-        .format("jdbc")
-        .option("driver", "org.postgresql.Driver")
-        .option("url", rdbmsConnUrl)
-        .option("dbtable", filmActorTblName)
-        .option("user", rdbmsUsrName)
-        .option("lowerBound", minval2)
-        .option("upperBound", maxval2)
-        .option("numPartitions", numPartitions2)
-        .option("partitionColumn", srcTblPkColName2)
-        .load()
-        .drop("last_update")
-      //== Debug purpose ==
-      //filmActorTblDF.printSchema()
-      //filmActorTblDF.show(5)
-      filmActorTblDF.createOrReplaceTempView(filmActorTblName)
+      val filmActorTblDF = jdbcRead(spark, filmActorTblName, minval2, maxval2, numPartitions2, srcTblPkColName2)
 
       /**
        * STEP 4: Combine "film", "actor", "film_actor" DataFrames together into

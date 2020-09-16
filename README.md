@@ -1,6 +1,6 @@
 # Overview 
 
-This repo demonstrates how to use DSE Analytics (Apach Spark) to load data from multiple RDBMS (PostgreSQL) tables; combine and massage the data a bit; and the data write data into on Cassandra (C*) table.
+This repo demonstrates how to use DSE Analytics (Apach Spark) to load data from  RDBMS (PostgreSQL) tables; combine the data together; do some modifciaiton; and then write the result into a Cassandra (C*) table.
 
 The program reads data from PostgreSQL tables using corresponding [JDBC driver](https://jdbc.postgresql.org/) and write data into C* table using DataStax [Spark Cassandra Connector](https://github.com/datastax/spark-cassandra-connector). 
 
